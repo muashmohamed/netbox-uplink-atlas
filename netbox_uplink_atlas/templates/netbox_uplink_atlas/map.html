@@ -93,7 +93,7 @@
   );
   const streets = L.tileLayer(
     "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    { maxZoom: 20, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors" }
+    { maxZoom: 20, maxNativeZoom: 19, referrerPolicy: "strict-origin-when-cross-origin", attribution: "&copy; OpenStreetMap contributors" }
   );
 
   const map = L.map("ua-map", { layers: [satellite, labels], zoomControl: true })
