@@ -1,0 +1,189 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Uplink map{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  .ua-summary { display: flex; flex-wrap: wrap; gap: 1.75rem; margin: 0 0 1rem; }
+  .ua-summary div { line-height: 1.2; }
+  .ua-summary strong { display: block; font-size: 1.5rem; font-weight: 600; }
+  .ua-summary span { color: var(--tblr-secondary, #6c757d); font-size: .85rem; }
+  #ua-map {
+    height: calc(100vh - 260px); min-height: 460px; width: 100%;
+    border-radius: 6px; border: 1px solid var(--tblr-border-color, #dce1e7);
+  }
+  .ua-legend {
+    background: rgba(255,255,255,.94); color: #1d2733; padding: .55rem .75rem;
+    border-radius: 4px; font-size: .8rem; line-height: 1.6; box-shadow: 0 1px 4px rgba(0,0,0,.25);
+  }
+  .ua-legend i { display: inline-block; width: 26px; vertical-align: middle; margin-right: .4rem; }
+  .ua-legend .trunk { border-top: 4px solid #1f6f8b; }
+  .ua-legend .other { border-top: 3px dashed #7a8794; }
+  .ua-legend .dot { width: 12px; height: 12px; border-radius: 50%; background: #1f6f8b; border: 2px solid #fff; box-shadow: 0 0 0 1px #1f6f8b; margin: 0 calc(.4rem + 7px) 0 7px; }
+  .ua-legend .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px dashed #1f6f8b; background: rgba(255,255,255,.6); margin: 0 calc(.4rem + 7px) 0 7px; }
+  .ua-popup h6 { margin: 0 0 .25rem; font-size: .95rem; }
+  .ua-popup .muted { color: #5f6b77; font-size: .8rem; }
+  .ua-popup ul { padding-left: 1rem; margin: .4rem 0 0; }
+  .ua-popup li { margin-bottom: .25rem; }
+  .ua-empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    z-index: 500; pointer-events: none;
+  }
+  .ua-empty div {
+    pointer-events: auto; background: rgba(255,255,255,.95); color: #1d2733;
+    max-width: 420px; padding: 1rem 1.25rem; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.2);
+  }
+</style>
+
+<div class="ua-summary">
+  <div><strong>{{ stats.racks_precise }}</strong><span>racks at exact GPS</span></div>
+  <div><strong>{{ stats.racks_site_only }}</strong><span>racks at site position</span></div>
+  <div><strong>{{ stats.racks_unplaced }}</strong><span>racks without a position</span></div>
+  <div><strong>{{ stats.links }}</strong><span>rack-to-rack links</span></div>
+  <div><strong>{{ stats.trunks }}</strong><span>with fiber trunks</span></div>
+</div>
+
+<div style="position: relative;">
+  <div id="ua-map"></div>
+  {% if not map_data.racks %}
+    <div class="ua-empty"><div>
+      <strong>No racks can be placed yet.</strong><br>
+      Set latitude and longitude on one device in each rack (the ODF is best),
+      or on the rack's site. Racks appear here as soon as they have a position.
+    </div></div>
+  {% endif %}
+</div>
+
+{% if map_data.unplaced %}
+  <details class="mt-3">
+    <summary>{{ map_data.unplaced|length }} rack{{ map_data.unplaced|length|pluralize }} not on the map</summary>
+    <p class="text-secondary mt-2 mb-1">
+      Give one device in the rack a latitude and longitude, or set them on the site.
+    </p>
+    <ul>
+      {% for r in map_data.unplaced %}<li><a href="{{ r.url }}">{{ r.name }}</a></li>{% endfor %}
+    </ul>
+  </details>
+{% endif %}
+{% if stats.links_hidden %}
+  <p class="text-secondary mt-2">
+    {{ stats.links_hidden }} link{{ stats.links_hidden|pluralize }} not drawn because one end's rack has no position.
+  </p>
+{% endif %}
+
+{{ map_data|json_script:"ua-data" }}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById("ua-data").textContent);
+  const TRUNK = "#1f6f8b", OTHER = "#7a8794";
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]
+  ));
+
+  const satellite = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics" }
+  );
+  const labels = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 20, maxNativeZoom: 19, attribution: "Labels &copy; Esri" }
+  );
+  const streets = L.tileLayer(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { maxZoom: 20, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors" }
+  );
+
+  const map = L.map("ua-map", { layers: [satellite, labels], zoomControl: true })
+    .setView(data.settings.center, data.settings.zoom);
+  L.control.layers({ "Satellite": satellite, "Street map": streets }, { "Place names": labels }).addTo(map);
+  L.control.scale({ imperial: false }).addTo(map);
+
+  // Racks sharing the exact same point are fanned out in a small circle (about 10 m)
+  // so each one stays clickable. Their real coordinates are unchanged in NetBox.
+  const groups = {};
+  data.racks.forEach((r) => {
+    const key = r.lat.toFixed(6) + "," + r.lon.toFixed(6);
+    (groups[key] = groups[key] || []).push(r);
+  });
+  const pos = {};
+  Object.values(groups).forEach((list) => {
+    if (list.length === 1) { pos[list[0].id] = [list[0].lat, list[0].lon]; return; }
+    const radius = 0.00009;
+    list.forEach((r, i) => {
+      const angle = (2 * Math.PI * i) / list.length;
+      pos[r.id] = [r.lat + radius * Math.sin(angle), r.lon + radius * Math.cos(angle)];
+    });
+  });
+
+  const byId = Object.fromEntries(data.racks.map((r) => [r.id, r]));
+
+  // Links first, so rack markers sit on top.
+  data.links.forEach((l) => {
+    const a = pos[l.a], b = pos[l.b];
+    if (!a || !b) return;
+    const trunk = l.trunks > 0;
+    const weight = Math.min(3 + l.count, 8);
+    L.polyline([a, b], { color: "#ffffff", weight: weight + 3, opacity: 0.8, interactive: false }).addTo(map);
+    const line = L.polyline([a, b], {
+      color: trunk ? TRUNK : OTHER, weight: weight, opacity: 0.95,
+      dashArray: trunk ? null : "8 7",
+    }).addTo(map);
+
+    const items = l.cables.map((c) => {
+      const details = [c.trunk ? "Fiber trunk" : "Cable", c.type, c.length].filter(Boolean).join(", ");
+      const status = c.status !== "connected" ? ` <em>(${esc(c.status)})</em>` : "";
+      return `<li><a href="${esc(c.url)}">${esc(c.label)}</a>${status}<br><span class="muted">${esc(details)}</span></li>`;
+    }).join("");
+    line.bindPopup(
+      `<div class="ua-popup"><h6>${esc(byId[l.a].name)} to ${esc(byId[l.b].name)}</h6>` +
+      `<span class="muted">${l.count} cable${l.count === 1 ? "" : "s"} between these racks</span>` +
+      `<ul>${items}</ul></div>`,
+      { maxWidth: 340 }
+    );
+    line.bindTooltip(`${l.count} cable${l.count === 1 ? "" : "s"}`, { sticky: true });
+  });
+
+  const markers = [];
+  data.racks.forEach((r) => {
+    const m = L.circleMarker(pos[r.id], {
+      radius: 8,
+      color: r.precise ? "#ffffff" : TRUNK,
+      weight: 2,
+      dashArray: r.precise ? null : "3 3",
+      fillColor: r.precise ? TRUNK : "#ffffff",
+      fillOpacity: r.precise ? 1 : 0.7,
+    }).addTo(map);
+    const where = [r.site, r.location].filter(Boolean).map(esc).join(", ");
+    const source = r.precise
+      ? "Position from device " + esc(r.source.replace(/^device:/, ""))
+      : "Position from the site (approximate)";
+    m.bindPopup(
+      `<div class="ua-popup"><h6>${esc(r.name)}</h6>` +
+      `<div>${where}</div><div class="muted">${source}</div>` +
+      `<div class="mt-2"><a href="${esc(r.url)}">Open rack in NetBox</a></div></div>`
+    );
+    m.bindTooltip(esc(r.name), { direction: "top", offset: [0, -8] });
+    markers.push(m);
+  });
+
+  if (markers.length) {
+    map.fitBounds(L.featureGroup(markers).getBounds().pad(0.2), { maxZoom: 17 });
+  }
+
+  const legend = L.control({ position: "bottomleft" });
+  legend.onAdd = () => {
+    const div = L.DomUtil.create("div", "ua-legend");
+    div.innerHTML =
+      '<div><i class="trunk"></i>Fiber trunk (ODF to ODF)</div>' +
+      '<div><i class="other"></i>Other cable between racks</div>' +
+      '<div><i class="dot"></i>Rack at exact GPS</div>' +
+      '<div><i class="ring"></i>Rack at site position</div>';
+    return div;
+  };
+  legend.addTo(map);
+})();
+</script>
+{% endblock %}
