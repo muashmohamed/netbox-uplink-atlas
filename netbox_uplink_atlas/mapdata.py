@@ -8,6 +8,7 @@ Collects everything the map needs, straight from NetBox. Read-only.
 """
 from collections import defaultdict
 from collections import deque
+from collections import deque
 
 from dcim.models import Cable, CableTermination, Device, Rack
 from netbox.plugins import get_plugin_config
