@@ -6,9 +6,7 @@ Collects everything the map needs, straight from NetBox. Read-only.
 - A link is any cable whose A end and B end sit in different racks.
 - A link is a "trunk" when both ends are rear ports (ODF to ODF fiber).
 """
-from collections import defaultdict
-from collections import deque
-from collections import deque
+from collections import defaultdict, deque
 
 from dcim.models import Cable, CableTermination, Device, Rack
 from netbox.plugins import get_plugin_config
@@ -149,4 +147,112 @@ def build_map_data():
             "trunks": sum(1 for l in links if l["trunks"]),
             "links_hidden": hidden_links,
         },
+    }
+
+
+def get_rack_panel_data(rack_id, map_data):
+    """
+    Everything the 'rack panel' needs for one rack: its own info, plus every
+    direct link (neighbor rack) it has, with cable/trunk counts.
+
+    `map_data` is the dict already returned by build_map_data() — this
+    function just filters/reshapes it, it doesn't touch NetBox directly.
+    """
+    rack = next((r for r in map_data["racks"] if r["id"] == rack_id), None)
+    if rack is None:
+        return None
+
+    neighbors = []
+    for link in map_data["links"]:
+        other_id = None
+        if link["a"] == rack_id:
+            other_id = link["b"]
+        elif link["b"] == rack_id:
+            other_id = link["a"]
+        if other_id is None:
+            continue
+
+        other_rack = next((r for r in map_data["racks"] if r["id"] == other_id), None)
+        neighbors.append({
+            "rack_id": other_id,
+            "rack_name": other_rack["name"] if other_rack else f"Rack #{other_id}",
+            "rack_url": other_rack["url"] if other_rack else "",
+            "cable_count": link["count"],
+            "trunk_count": link["trunks"],
+            "cables": link["cables"],
+        })
+
+    # Most-connected neighbors first — usually what you want to see first
+    # when looking at a rack's uplinks.
+    neighbors.sort(key=lambda n: n["cable_count"], reverse=True)
+
+    return {
+        "rack": rack,
+        "neighbors": neighbors,
+        "neighbor_count": len(neighbors),
+        "total_cables": sum(n["cable_count"] for n in neighbors),
+        "total_trunks": sum(n["trunk_count"] for n in neighbors),
+    }
+
+
+def find_path(rack_a_id, rack_b_id, map_data):
+    """
+    Shortest path between two racks, hopping only along existing cable
+    links (breadth-first search — finds the path with the fewest hops,
+    not necessarily the shortest cable length).
+
+    Returns a dict describing the path, or None if there's no path at all
+    (the two racks aren't connected through any chain of cables).
+    """
+    if rack_a_id == rack_b_id:
+        return {"racks": [rack_a_id], "hops": [], "hop_count": 0}
+
+    # Build an adjacency list once: {rack_id: [(neighbor_id, link), ...]}
+    adjacency = {}
+    for link in map_data["links"]:
+        adjacency.setdefault(link["a"], []).append((link["b"], link))
+        adjacency.setdefault(link["b"], []).append((link["a"], link))
+
+    if rack_a_id not in adjacency or rack_b_id not in adjacency:
+        return None  # one of the racks has no cable links at all
+
+    # Standard BFS, tracking how we got to each rack so we can rebuild the path.
+    visited = {rack_a_id}
+    came_from = {}  # rack_id -> (previous_rack_id, link_used)
+    queue = deque([rack_a_id])
+
+    while queue:
+        current = queue.popleft()
+        if current == rack_b_id:
+            break
+        for neighbor_id, link in adjacency.get(current, []):
+            if neighbor_id not in visited:
+                visited.add(neighbor_id)
+                came_from[neighbor_id] = (current, link)
+                queue.append(neighbor_id)
+
+    if rack_b_id not in came_from and rack_a_id != rack_b_id:
+        return None  # no path exists between these two racks
+
+    # Walk backwards from B to A to rebuild the path, then reverse it.
+    path_racks = [rack_b_id]
+    path_links = []
+    node = rack_b_id
+    while node != rack_a_id:
+        prev, link = came_from[node]
+        path_links.append(link)
+        path_racks.append(prev)
+        node = prev
+    path_racks.reverse()
+    path_links.reverse()
+
+    rack_lookup = {r["id"]: r for r in map_data["racks"]}
+    return {
+        "racks": [
+            {"id": rid, "name": rack_lookup.get(rid, {}).get("name", f"Rack #{rid}")}
+            for rid in path_racks
+        ],
+        "hops": path_links,
+        "hop_count": len(path_links),
+        "total_cables": sum(l["count"] for l in path_links),
     }
