@@ -7,6 +7,7 @@ Collects everything the map needs, straight from NetBox. Read-only.
 - A link is a "trunk" when both ends are rear ports (ODF to ODF fiber).
 """
 from collections import defaultdict
+from collections import deque
 
 from dcim.models import Cable, CableTermination, Device, Rack
 from netbox.plugins import get_plugin_config
