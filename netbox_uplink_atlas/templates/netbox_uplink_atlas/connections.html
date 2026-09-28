@@ -1,0 +1,131 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Connections{% endblock %}
+
+{% block content %}
+<style>
+  .uac-summary { display: flex; flex-wrap: wrap; gap: 1.75rem; margin: 0 0 1rem; }
+  .uac-summary div { line-height: 1.2; }
+  .uac-summary strong { display: block; font-size: 1.5rem; font-weight: 600; }
+  .uac-summary span { color: var(--tblr-secondary, #6c757d); font-size: .85rem; }
+  .uac-switch { border: 1px solid var(--tblr-border-color, #dce1e7); border-radius: 6px; margin-bottom: 1rem; overflow: hidden; }
+  .uac-switch-header { padding: .75rem 1rem; background: rgba(0,0,0,.03); display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .uac-switch-header h6 { margin: 0; }
+  .uac-switch-header .muted { color: #5f6b77; font-size: .85rem; }
+  .uac-switch-body { display: none; }
+  .uac-switch.open .uac-switch-body { display: block; }
+  table.uac-interfaces { width: 100%; margin: 0; }
+  table.uac-interfaces th, table.uac-interfaces td { padding: .5rem 1rem; font-size: .85rem; border-top: 1px solid #eceff1; }
+  table.uac-interfaces th { text-align: left; color: #5f6b77; font-weight: 500; }
+  .uac-badge-connected { color: #1f6f8b; font-weight: 600; }
+  .uac-badge-empty { color: #9aa4ad; }
+  .uac-path-controls {
+    display: flex; flex-wrap: wrap; gap: .75rem; align-items: flex-end;
+    margin: 0 0 1.5rem; padding: .75rem; background: rgba(0,0,0,.03);
+    border-radius: 6px; border: 1px solid var(--tblr-border-color, #dce1e7);
+  }
+  .uac-path-controls .form-label { font-size: .8rem; margin-bottom: .25rem; }
+  .uac-path-controls select { min-width: 240px; }
+  .uac-path-result { width: 100%; margin-top: .5rem; }
+  .uac-hop { padding: .5rem 0; border-top: 1px solid #eceff1; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+  .uac-hop:first-child { border-top: none; }
+</style>
+
+<form class="uac-path-controls" method="get">
+  <div>
+    <label class="form-label">Device A</label>
+    <select name="device_a" class="form-select">
+      <option value="">-- choose --</option>
+      {% for id, name in device_choices %}
+        <option value="{{ id }}" {% if selected_device_a == id|stringformat:"s" %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label class="form-label">Device B</label>
+    <select name="device_b" class="form-select">
+      <option value="">-- choose --</option>
+      {% for id, name in device_choices %}
+        <option value="{{ id }}" {% if selected_device_b == id|stringformat:"s" %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <button type="submit" class="btn btn-primary btn-sm">Find path</button>
+    <a href="{% url 'plugins:netbox_uplink_atlas:connections' %}" class="btn btn-outline-secondary btn-sm">Clear</a>
+  </div>
+
+  {% if path_error %}
+    <div class="uac-path-result text-danger">{{ path_error }}</div>
+  {% elif path_result %}
+    <div class="uac-path-result">
+      <strong>{{ path_result.hop_count }} hop{{ path_result.hop_count|pluralize }}</strong>
+      {% for hop in path_result.hops %}
+        <div class="uac-hop">
+          <span>{{ hop.from_device_name }} <span class="muted">({{ hop.from_interface }})</span> &rarr; {{ hop.to_device_name }} <span class="muted">({{ hop.to_interface }})</span></span>
+          {% if hop.trace_url %}<a href="{{ hop.trace_url }}" class="btn btn-sm btn-outline-primary">View full trace</a>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</form>
+
+<div class="uac-summary">
+  <div><strong>{{ stats.switch_count }}</strong><span>switches</span></div>
+  <div><strong>{{ stats.interface_count }}</strong><span>interfaces</span></div>
+  <div><strong>{{ stats.connected_count }}</strong><span>with a cable</span></div>
+</div>
+
+{% if not switches %}
+  <p class="text-secondary">
+    No switches found. This page looks for Devices whose Role slug is one of the
+    configured switch roles (see the plugin's <code>switch_role_slugs</code> setting).
+  </p>
+{% endif %}
+
+{% for switch in switches %}
+  <div class="uac-switch" id="uac-switch-{{ switch.id }}">
+    <div class="uac-switch-header" onclick="document.getElementById('uac-switch-{{ switch.id }}').classList.toggle('open')">
+      <div>
+        <h6><a href="{{ switch.url }}" onclick="event.stopPropagation()">{{ switch.name }}</a></h6>
+        <span class="muted">{{ switch.role }}{% if switch.site %} &middot; {{ switch.site }}{% endif %}{% if switch.location %} / {{ switch.location }}{% endif %}{% if switch.rack %} / {{ switch.rack }}{% endif %}</span>
+      </div>
+      <div class="muted">{{ switch.connected_count }} / {{ switch.interface_count }} connected</div>
+    </div>
+    <div class="uac-switch-body">
+      <table class="uac-interfaces">
+        <thead>
+          <tr>
+            <th>Interface</th>
+            <th>Type</th>
+            <th>Cable</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for iface in switch.interfaces %}
+          <tr>
+            <td><a href="{{ iface.url }}">{{ iface.name }}</a></td>
+            <td>{{ iface.type }}</td>
+            <td>
+              {% if iface.has_cable %}
+                <a href="{{ iface.cable_url }}" class="uac-badge-connected">{{ iface.cable_label }}</a>
+              {% else %}
+                <span class="uac-badge-empty">Not connected</span>
+              {% endif %}
+            </td>
+            <td>{{ iface.cable_status|default:"—" }}</td>
+            <td>
+              {% if iface.has_cable and iface.trace_url %}
+                <a href="{{ iface.trace_url }}" class="btn btn-sm btn-outline-primary">Trace</a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endfor %}
+{% endblock %}

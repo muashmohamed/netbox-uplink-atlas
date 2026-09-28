@@ -3,6 +3,7 @@
 {% block title %}Uplink map{% endblock %}
 
 {% block content %}
+{% csrf_token %}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   .ua-summary { display: flex; flex-wrap: wrap; gap: 1.75rem; margin: 0 0 1rem; }
@@ -34,18 +35,83 @@
     pointer-events: auto; background: rgba(255,255,255,.95); color: #1d2733;
     max-width: 420px; padding: 1rem 1.25rem; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.2);
   }
+  /* --- Rack panel + path finder additions --- */
+  .ua-controls {
+    display: flex; flex-wrap: wrap; gap: .75rem; align-items: flex-end;
+    margin: 0 0 .75rem; padding: .75rem; background: rgba(0,0,0,.03);
+    border-radius: 6px; border: 1px solid var(--tblr-border-color, #dce1e7);
+  }
+  .ua-controls .form-label { font-size: .8rem; margin-bottom: .25rem; }
+  .ua-controls select { min-width: 220px; }
+  #ua-path-result { font-size: .85rem; margin-top: .5rem; width: 100%; }
+  #ua-rack-panel {
+    position: absolute; top: 12px; right: 12px; z-index: 900;
+    background: rgba(255,255,255,.97); border-radius: 6px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.25); padding: .9rem 1rem;
+    max-width: 300px; max-height: calc(100% - 24px); overflow-y: auto;
+    font-size: .85rem; display: none;
+  }
+  #ua-rack-panel h6 { margin: 0 0 .5rem; font-size: 1rem; }
+  #ua-rack-panel .close-btn {
+    float: right; cursor: pointer; color: #5f6b77; font-weight: bold;
+  }
+  #ua-rack-panel ul { list-style: none; padding: 0; margin: .5rem 0 0; }
+  #ua-rack-panel li {
+    padding: .4rem 0; border-top: 1px solid #eceff1; display: flex;
+    justify-content: space-between; gap: .5rem;
+  }
+  #ua-rack-panel li:first-child { border-top: none; }
+  .ua-path-highlight { animation: ua-pulse 1.4s ease-in-out infinite; }
+  @keyframes ua-pulse { 0%,100% { opacity: .95; } 50% { opacity: .45; } }
 </style>
 
 <div class="ua-summary">
   <div><strong>{{ stats.racks_precise }}</strong><span>racks at exact GPS</span></div>
   <div><strong>{{ stats.racks_site_only }}</strong><span>racks at site position</span></div>
   <div><strong>{{ stats.racks_unplaced }}</strong><span>racks without a position</span></div>
+  <div><strong>{{ stats.racks_hidden }}</strong><span>racks hidden</span></div>
   <div><strong>{{ stats.links }}</strong><span>rack-to-rack links</span></div>
   <div><strong>{{ stats.trunks }}</strong><span>with fiber trunks</span></div>
 </div>
 
+<div class="ua-controls">
+  <div>
+    <label class="form-label">From rack</label>
+    <select id="ua-path-a" class="form-select"></select>
+  </div>
+  <div>
+    <label class="form-label">To rack</label>
+    <select id="ua-path-b" class="form-select"></select>
+  </div>
+  <div>
+    <button type="button" id="ua-path-find" class="btn btn-primary btn-sm">Find path</button>
+    <button type="button" id="ua-path-clear" class="btn btn-outline-secondary btn-sm">Clear</button>
+  </div>
+  <div id="ua-path-result"></div>
+</div>
+
+<style>
+  .ua-layout { display: flex; gap: 1rem; align-items: flex-start; }
+  .ua-main { flex: 1 1 auto; min-width: 0; }
+  .ua-side { flex: 0 0 300px; width: 300px; }
+  .ua-side-list { max-height: 260px; overflow-y: auto; }
+  .ua-side-item { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .3rem 0; border-top: 1px solid #eceff1; font-size: .85rem; }
+  .ua-side-item:first-child { border-top: none; }
+  .ua-side-item a { overflow-wrap: anywhere; }
+  .ua-hint { font-size: .75rem; }
+  @media (max-width: 992px) {
+    .ua-layout { flex-direction: column; }
+    .ua-side { flex: 1 1 auto; width: 100%; }
+  }
+</style>
+<div class="ua-layout">
+<div class="ua-main">
 <div style="position: relative;">
   <div id="ua-map"></div>
+  <div id="ua-rack-panel">
+    <span class="close-btn" onclick="document.getElementById('ua-rack-panel').style.display='none'">&times;</span>
+    <div id="ua-rack-panel-content"></div>
+  </div>
   {% if not map_data.racks %}
     <div class="ua-empty"><div>
       <strong>No racks can be placed yet.</strong><br>
@@ -55,20 +121,63 @@
   {% endif %}
 </div>
 
-{% if map_data.unplaced %}
-  <details class="mt-3">
-    <summary>{{ map_data.unplaced|length }} rack{{ map_data.unplaced|length|pluralize }} not on the map</summary>
-    <p class="text-secondary mt-2 mb-1">
-      Give one device in the rack a latitude and longitude, or set them on the site.
-    </p>
-    <ul>
-      {% for r in map_data.unplaced %}<li><a href="{{ r.url }}">{{ r.name }}</a></li>{% endfor %}
-    </ul>
-  </details>
-{% endif %}
+</div>
+<div class="ua-side">
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Not on the map</span>
+      <span class="badge text-bg-secondary">{{ map_data.unplaced|length }}</span>
+    </div>
+    <div class="card-body p-2">
+      <input type="search" class="form-control form-control-sm mb-2 ua-filter" data-target="ua-list-unplaced" placeholder="Search by name...">
+      <ul class="list-unstyled mb-0 ua-side-list" id="ua-list-unplaced">
+        {% for r in map_data.unplaced %}
+        <li class="ua-side-item" data-name="{{ r.name|lower }}">
+          <a href="{{ r.url }}">{{ r.name }}</a>
+          <button type="button" class="btn btn-sm btn-outline-primary" data-rack-id="{{ r.id }}" data-rack-name="{{ r.name }}" onclick="uaPlaceRack(this)">Place</button>
+        </li>
+        {% empty %}
+        <li class="text-secondary">Every rack has a position.</li>
+        {% endfor %}
+      </ul>
+      <div class="text-secondary mt-2 ua-hint">Place gives the rack's best device (an ODF if there is one) its GPS position. You can also set latitude and longitude on a device or the site in NetBox.</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Hidden racks</span>
+      <span class="badge text-bg-secondary">{{ map_data.hidden|length }}</span>
+    </div>
+    <div class="card-body p-2">
+      <input type="search" class="form-control form-control-sm mb-2 ua-filter" data-target="ua-list-hidden" placeholder="Search by name...">
+      {% if map_data.hidden %}
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <input type="checkbox" class="form-check-input mt-0" id="ua-hidden-all" title="Select all shown below">
+        <button type="button" class="btn btn-sm btn-outline-primary" id="ua-show-selected" disabled>Show selected</button>
+        <button type="button" class="btn btn-sm btn-primary" id="ua-show-all">Show all</button>
+      </div>
+      {% endif %}
+      <ul class="list-unstyled mb-0 ua-side-list" id="ua-list-hidden">
+        {% for r in map_data.hidden %}
+        <li class="ua-side-item" data-name="{{ r.name|lower }}">
+          <label class="d-flex align-items-center gap-2 mb-0 flex-grow-1">
+            <input type="checkbox" class="form-check-input mt-0 ua-hidden-check" value="{{ r.id }}">
+            <a href="{{ r.url }}">{{ r.name }}</a>
+          </label>
+          <button type="button" class="btn btn-sm btn-outline-primary" data-rack-id="{{ r.id }}" data-rack-name="{{ r.name }}" onclick="uaShowRack(this)">Show</button>
+        </li>
+        {% empty %}
+        <li class="text-secondary">No hidden racks.</li>
+        {% endfor %}
+      </ul>
+      <div class="text-secondary mt-2 ua-hint">Hidden racks are kept off the map. Their coordinates are untouched.</div>
+    </div>
+  </div>
+</div>
+</div>
 {% if stats.links_hidden %}
   <p class="text-secondary mt-2">
-    {{ stats.links_hidden }} link{{ stats.links_hidden|pluralize }} not drawn because one end's rack has no position.
+    {{ stats.links_hidden }} link{{ stats.links_hidden|pluralize }} not drawn because one end's rack has no position or is hidden.
   </p>
 {% endif %}
 
@@ -184,6 +293,483 @@
     return div;
   };
   legend.addTo(map);
+
+  // ==========================================================
+  // Rack panel + A-to-B path finder (new)
+  // ==========================================================
+
+  function uaBuildAdjacency(links) {
+    const adjacency = {};
+    links.forEach((link) => {
+      (adjacency[link.a] = adjacency[link.a] || []).push([link.b, link]);
+      (adjacency[link.b] = adjacency[link.b] || []).push([link.a, link]);
+    });
+    return adjacency;
+  }
+
+  function uaFindPath(rackAId, rackBId, links) {
+    if (rackAId === rackBId) return { rackIds: [rackAId], hops: [], hopCount: 0 };
+    const adjacency = uaBuildAdjacency(links);
+    if (!adjacency[rackAId] || !adjacency[rackBId]) return null;
+
+    const visited = new Set([rackAId]);
+    const cameFrom = {};
+    const queue = [rackAId];
+    let qi = 0;
+    while (qi < queue.length) {
+      const current = queue[qi++];
+      if (current === rackBId) break;
+      for (const [neighborId, link] of adjacency[current] || []) {
+        if (!visited.has(neighborId)) {
+          visited.add(neighborId);
+          cameFrom[neighborId] = [current, link];
+          queue.push(neighborId);
+        }
+      }
+    }
+    if (!(rackBId in cameFrom) && rackAId !== rackBId) return null;
+
+    const rackIds = [rackBId];
+    const hops = [];
+    let node = rackBId;
+    while (node !== rackAId) {
+      const [prev, link] = cameFrom[node];
+      hops.push(link);
+      rackIds.push(prev);
+      node = prev;
+    }
+    rackIds.reverse();
+    hops.reverse();
+    return { rackIds, hops, hopCount: hops.length };
+  }
+
+  function uaGetRackNeighbors(rackId, links) {
+    const neighbors = [];
+    links.forEach((link) => {
+      let otherId = null;
+      if (link.a === rackId) otherId = link.b;
+      else if (link.b === rackId) otherId = link.a;
+      if (otherId === null) return;
+      neighbors.push({
+        rackId: otherId,
+        rackName: byId[otherId] ? byId[otherId].name : `Rack #${otherId}`,
+        cableCount: link.count,
+        trunkCount: link.trunks,
+      });
+    });
+    neighbors.sort((a, b) => b.cableCount - a.cableCount);
+    return neighbors;
+  }
+
+  function uaShowRackPanel(rack) {
+    const neighbors = uaGetRackNeighbors(rack.id, data.links);
+    const panel = document.getElementById("ua-rack-panel");
+    const content = document.getElementById("ua-rack-panel-content");
+    const rows = neighbors.length
+      ? neighbors.map((n) =>
+          `<li><span>${esc(n.rackName)}</span><span class="muted">${n.cableCount} cable${n.cableCount === 1 ? "" : "s"}${n.trunkCount ? ", trunk" : ""}</span></li>`
+        ).join("")
+      : '<li class="muted">No direct connections</li>';
+
+    const moveButton = rack.precise
+      ? `<button type="button" class="btn btn-sm btn-outline-secondary mt-2 w-100" onclick="uaStartMoveMode(${rack.id}, '${esc(rack.name).replace(/'/g, "\\'")}')">Move this rack</button>` +
+        `<button type="button" class="btn btn-sm btn-outline-danger mt-1 w-100" onclick="uaUnplaceRack(${rack.id}, '${esc(rack.name).replace(/'/g, "\\'")}')">Unplace this rack</button>`
+      : `<div class="mt-2 muted" style="font-size:.75rem;">This rack has no position of its own yet -- it shows at its site's approximate location.</div>` +
+        `<button type="button" class="btn btn-sm btn-outline-primary mt-1 w-100" onclick="uaStartMoveMode(${rack.id}, '${esc(rack.name).replace(/'/g, "\\'")}')">Place this rack precisely</button>`;
+
+    content.innerHTML =
+      `<h6>${esc(rack.name)}</h6>` +
+      `<div class="muted">${neighbors.length} direct connection${neighbors.length === 1 ? "" : "s"}</div>` +
+      `<ul>${rows}</ul>` + moveButton +
+      `<button type="button" class="btn btn-sm btn-outline-secondary mt-1 w-100" data-rack-id="${rack.id}" data-rack-name="${esc(rack.name)}" onclick="uaHideRackSmart(this)">Hide this rack</button>`;
+    panel.style.display = "block";
+  }
+
+  markers.forEach((m, i) => {
+    m.on("click", () => uaShowRackPanel(data.racks[i]));
+  });
+
+  // -- Move rack: click a rack (via its panel button), then click the map --
+  let uaMoveRackId = null;
+  let uaMoveRackName = null;
+
+  function getCsrfToken() {
+    const input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+    return input ? input.value : "";
+  }
+
+  window.uaStartMoveMode = function (rackId, rackName) {
+    uaMoveRackId = rackId;
+    uaMoveRackName = rackName;
+    document.getElementById("ua-rack-panel").style.display = "none";
+    document.getElementById("ua-map").style.cursor = "crosshair";
+    let banner = document.getElementById("ua-move-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "ua-move-banner";
+      banner.style.cssText =
+        "position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:950;" +
+        "background:#1f6f8b;color:#fff;padding:.5rem 1rem;border-radius:6px;font-size:.85rem;" +
+        "box-shadow:0 2px 8px rgba(0,0,0,.3);";
+      document.querySelector("#ua-map").parentElement.appendChild(banner);
+    }
+    banner.textContent = `Click on the map to place "${rackName}" — press Esc to cancel`;
+    banner.style.display = "block";
+  };
+
+  window.uaUnplaceRack = function (rackId, rackName) {
+    document.getElementById("ua-rack-panel").style.display = "none";
+    if (!confirm(`Remove "${rackName}" from the map?\n\nThis clears its device's GPS coordinates. You can place it again anytime from the "not on the map" list.`)) {
+      return;
+    }
+    const unplaceUrlTemplate = "{% url 'plugins:netbox_uplink_atlas:unplace_rack' rack_id=0 %}";
+    const url = unplaceUrlTemplate.replace("/0/unplace/", `/${rackId}/unplace/`);
+    fetch(url, {
+      method: "POST",
+      headers: { "X-CSRFToken": getCsrfToken() },
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (ok && data.success) {
+          alert(`Removed "${data.rack_name}" from the map.`);
+          location.reload();
+        } else {
+          alert("Could not unplace rack: " + (data.error || "unknown error"));
+        }
+      })
+      .catch((err) => alert("Request failed: " + err));
+  };
+
+  function uaPostRackAction(urlTemplate, rackId) {
+    const url = urlTemplate.replace("/racks/0/", "/racks/" + rackId + "/");
+    fetch(url, { method: "POST", headers: { "X-CSRFToken": getCsrfToken() } })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (ok && data.success) {
+          location.reload();
+        } else {
+          alert("Could not complete that: " + (data.error || "unknown error"));
+        }
+      })
+      .catch((err) => alert("Request failed: " + err));
+  }
+
+  window.uaHideRack = function (btn) {
+    document.getElementById("ua-rack-panel").style.display = "none";
+    if (!confirm('Hide "' + btn.dataset.rackName + '" from the map? No coordinates are changed, and you can show it again from the Hidden racks list.')) {
+      return;
+    }
+    uaPostRackAction("{% url 'plugins:netbox_uplink_atlas:hide_rack' rack_id=0 %}", btn.dataset.rackId);
+  };
+
+  window.uaShowRack = function (btn) {
+    uaPostRackAction("{% url 'plugins:netbox_uplink_atlas:show_rack' rack_id=0 %}", btn.dataset.rackId);
+  };
+
+  window.uaPlaceRack = function (btn) {
+    window.uaStartMoveMode(btn.dataset.rackId, btn.dataset.rackName);
+  };
+
+  document.querySelectorAll(".ua-filter").forEach((input) => {
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      document.querySelectorAll("#" + input.dataset.target + " li[data-name]").forEach((li) => {
+        li.style.display = li.dataset.name.indexOf(q) === -1 ? "none" : "";
+      });
+    });
+  });
+
+  function uaCheckedVisible() {
+    return [...document.querySelectorAll("#ua-list-hidden li[data-name]")]
+      .filter((li) => li.style.display !== "none")
+      .map((li) => li.querySelector(".ua-hidden-check"))
+      .filter((c) => c && c.checked);
+  }
+
+  function uaRefreshBulk() {
+    const btn = document.getElementById("ua-show-selected");
+    if (!btn) return;
+    const n = uaCheckedVisible().length;
+    btn.disabled = n === 0;
+    btn.textContent = n ? "Show selected (" + n + ")" : "Show selected";
+  }
+
+  function uaBulkShow(payload) {
+    const url = "{% url 'plugins:netbox_uplink_atlas:show_racks_bulk' %}";
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+      body: JSON.stringify(payload),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (ok && data.success) {
+          location.reload();
+        } else {
+          alert("Could not show the racks: " + (data.error || "unknown error"));
+        }
+      })
+      .catch((err) => alert("Request failed: " + err));
+  }
+
+  (function () {
+    const allBox = document.getElementById("ua-hidden-all");
+    if (!allBox) return;
+    document.querySelectorAll(".ua-hidden-check").forEach((c) => c.addEventListener("change", uaRefreshBulk));
+    document.querySelectorAll('.ua-filter[data-target="ua-list-hidden"]').forEach((i) => i.addEventListener("input", uaRefreshBulk));
+    allBox.addEventListener("change", () => {
+      document.querySelectorAll("#ua-list-hidden li[data-name]").forEach((li) => {
+        if (li.style.display !== "none") li.querySelector(".ua-hidden-check").checked = allBox.checked;
+      });
+      uaRefreshBulk();
+    });
+    document.getElementById("ua-show-selected").addEventListener("click", () => {
+      const ids = uaCheckedVisible().map((c) => parseInt(c.value, 10));
+      if (ids.length) uaBulkShow({ rack_ids: ids });
+    });
+    document.getElementById("ua-show-all").addEventListener("click", () => {
+      const total = document.querySelectorAll(".ua-hidden-check").length;
+      if (confirm("Show all " + total + " hidden rack" + (total === 1 ? "" : "s") + " on the map?")) {
+        uaBulkShow({ all: true });
+      }
+    });
+  })();
+
+  function uaPostJson(url, payload) {
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+      body: JSON.stringify(payload),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (ok && data.success) {
+          location.reload();
+        } else {
+          alert("Could not hide the racks: " + (data.error || "unknown error"));
+        }
+      })
+      .catch((err) => alert("Request failed: " + err));
+  }
+
+  function uaCloseHideDialog() {
+    const el = document.getElementById("ua-hide-dialog");
+    if (el) el.remove();
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") uaCloseHideDialog();
+  });
+
+  // Racks that only reach the network through hubId, seen from the chosen uplinks.
+  function uaDownlinks(hubId, uplinkIds) {
+    const adj = uaBuildAdjacency(data.links);
+    const neighborsOf = (id) => (adj[id] || []).map((pair) => pair[0]);
+    const reachable = new Set(uplinkIds);
+    const queue = [...uplinkIds];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const nb of neighborsOf(cur)) {
+        if (nb === hubId || reachable.has(nb)) continue;
+        reachable.add(nb);
+        queue.push(nb);
+      }
+    }
+    const component = new Set([hubId]);
+    const queue2 = [hubId];
+    while (queue2.length) {
+      const cur = queue2.shift();
+      for (const nb of neighborsOf(cur)) {
+        if (!component.has(nb)) {
+          component.add(nb);
+          queue2.push(nb);
+        }
+      }
+    }
+    return [...component].filter((id) => id !== hubId && !reachable.has(id));
+  }
+
+  window.uaHideRackSmart = function (btn) {
+    const hubId = parseInt(btn.dataset.rackId, 10);
+    const hubName = btn.dataset.rackName;
+    const neighbors = uaGetRackNeighbors(hubId, data.links);
+    if (neighbors.length < 2) {
+      window.uaHideRack(btn);
+      return;
+    }
+    document.getElementById("ua-rack-panel").style.display = "none";
+    uaCloseHideDialog();
+
+    const overlay = document.createElement("div");
+    overlay.id = "ua-hide-dialog";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;";
+    overlay.innerHTML =
+      `<div style="background:#fff;color:#1d2733;width:min(480px,92vw);max-height:85vh;overflow:auto;border-radius:8px;padding:1rem 1.25rem;box-shadow:0 8px 30px rgba(0,0,0,.35);font-size:.9rem;">` +
+      `<h5 style="margin:0 0 .5rem;">Hide "${esc(hubName)}"?</h5>` +
+      `<p class="mb-2">This rack is connected to ${neighbors.length} other racks. Tick the connections that lead <strong>up</strong> to the rest of the network; they stay visible. Racks that only reach the network through "${esc(hubName)}" can be hidden with it. A tick always means "keep this one visible".</p>` +
+      `<div id="ua-hide-uplinks"></div>` +
+      `<div id="ua-hide-children" class="mt-2"></div>` +
+      `<div class="d-flex justify-content-end gap-2 mt-3">` +
+      `<button type="button" class="btn btn-sm btn-outline-secondary" id="ua-hide-cancel">Cancel</button>` +
+      `<button type="button" class="btn btn-sm btn-outline-primary" id="ua-hide-only">Hide only this rack</button>` +
+      `<button type="button" class="btn btn-sm btn-danger" id="ua-hide-cascade" disabled>Hide this rack and its downlinks</button>` +
+      `</div></div>`;
+    document.body.appendChild(overlay);
+
+    const uplinkBox = overlay.querySelector("#ua-hide-uplinks");
+    const childrenBox = overlay.querySelector("#ua-hide-children");
+    const cascadeBtn = overlay.querySelector("#ua-hide-cascade");
+    const baseLabel = "Hide this rack and its downlinks";
+    const nameOf = (id) => (byId[id] ? byId[id].name : "Rack #" + id);
+
+    uplinkBox.innerHTML = neighbors.map((n) =>
+      `<label class="d-flex align-items-center gap-2 mb-1"><input type="checkbox" class="form-check-input mt-0 ua-uplink" value="${n.rackId}"><span>${esc(n.rackName)}</span><span class="text-secondary">${n.cableCount} cable${n.cableCount === 1 ? "" : "s"}${n.trunkCount ? ", trunk" : ""}</span></label>`
+    ).join("");
+
+    function updateButton() {
+      const n = overlay.querySelectorAll(".ua-child:not(:checked)").length;
+      cascadeBtn.disabled = n === 0;
+      cascadeBtn.textContent = n ? "Hide this rack and " + n + " downlink" + (n === 1 ? "" : "s") : baseLabel;
+    }
+
+    function refresh() {
+      const uplinkIds = [...overlay.querySelectorAll(".ua-uplink:checked")].map((c) => parseInt(c.value, 10));
+      if (!uplinkIds.length) {
+        childrenBox.innerHTML = `<div class="text-secondary">Tick at least one uplink to see which racks would go with it.</div>`;
+        cascadeBtn.disabled = true;
+        cascadeBtn.textContent = baseLabel;
+        return;
+      }
+      const kids = uaDownlinks(hubId, uplinkIds).sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+      if (!kids.length) {
+        childrenBox.innerHTML = `<div class="text-secondary">No other racks depend only on "${esc(hubName)}", so hiding it cuts nothing else off.</div>`;
+        cascadeBtn.disabled = true;
+        cascadeBtn.textContent = baseLabel;
+        return;
+      }
+      childrenBox.innerHTML =
+        `<div style="color:#b45309;font-weight:600;">Warning: ${kids.length} more rack${kids.length === 1 ? "" : "s"} will be hidden too. Tick any you want to keep visible.</div>` +
+        kids.map((id) =>
+          `<label class="d-flex align-items-center gap-2 mb-1"><input type="checkbox" class="form-check-input mt-0 ua-child" value="${id}"><span>${esc(nameOf(id))}</span></label>`
+        ).join("");
+      updateButton();
+    }
+
+    uplinkBox.addEventListener("change", refresh);
+    childrenBox.addEventListener("change", updateButton);
+    overlay.querySelector("#ua-hide-cancel").addEventListener("click", uaCloseHideDialog);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) uaCloseHideDialog();
+    });
+    overlay.querySelector("#ua-hide-only").addEventListener("click", () => {
+      uaCloseHideDialog();
+      uaPostRackAction("{% url 'plugins:netbox_uplink_atlas:hide_rack' rack_id=0 %}", hubId);
+    });
+    cascadeBtn.addEventListener("click", () => {
+      const ids = [hubId].concat([...overlay.querySelectorAll(".ua-child:not(:checked)")].map((c) => parseInt(c.value, 10)));
+      uaCloseHideDialog();
+      uaPostJson("{% url 'plugins:netbox_uplink_atlas:hide_racks_bulk' %}", { rack_ids: ids });
+    });
+    refresh();
+  };
+
+  function uaCancelMoveMode() {
+    uaMoveRackId = null;
+    uaMoveRackName = null;
+    document.getElementById("ua-map").style.cursor = "";
+    const banner = document.getElementById("ua-move-banner");
+    if (banner) banner.style.display = "none";
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && uaMoveRackId !== null) uaCancelMoveMode();
+  });
+
+  map.on("click", (e) => {
+    if (uaMoveRackId === null) return;
+    const { lat, lng } = e.latlng;
+    const rackName = uaMoveRackName;
+    const rackId = uaMoveRackId;
+    uaCancelMoveMode();
+
+    if (!confirm(`Move "${rackName}" to this location?\n\nLat: ${lat.toFixed(6)}, Lon: ${lng.toFixed(6)}`)) {
+      return;
+    }
+
+    const UA_MOVE_URL_TEMPLATE = "{% url 'plugins:netbox_uplink_atlas:move_rack' rack_id=0 %}";
+    const moveUrl = UA_MOVE_URL_TEMPLATE.replace("/0/move/", `/${rackId}/move/`);
+
+    fetch(moveUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+      },
+      body: JSON.stringify({ lat, lon: lng }),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (ok && data.success) {
+          alert(`Moved "${data.rack_name}" (updated ${data.device_name}'s GPS coordinates). Reloading the map...`);
+          location.reload();
+        } else {
+          alert("Could not move rack: " + (data.error || "unknown error"));
+        }
+      })
+      .catch((err) => alert("Request failed: " + err));
+  });
+
+  let uaPathLayers = [];
+
+  function uaClearPath() {
+    uaPathLayers.forEach((l) => map.removeLayer(l));
+    uaPathLayers = [];
+    document.getElementById("ua-path-result").innerHTML = "";
+  }
+
+  function uaPopulatePathDropdowns() {
+    const sorted = [...data.racks].sort((a, b) => a.name.localeCompare(b.name));
+    const optionsHtml = sorted.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("");
+    document.getElementById("ua-path-a").innerHTML = optionsHtml;
+    document.getElementById("ua-path-b").innerHTML = optionsHtml;
+  }
+  uaPopulatePathDropdowns();
+
+  document.getElementById("ua-path-find").addEventListener("click", () => {
+    uaClearPath();
+    const aId = parseInt(document.getElementById("ua-path-a").value, 10);
+    const bId = parseInt(document.getElementById("ua-path-b").value, 10);
+    const resultDiv = document.getElementById("ua-path-result");
+
+    if (aId === bId) {
+      resultDiv.innerHTML = '<span class="text-secondary">Pick two different racks.</span>';
+      return;
+    }
+
+    const path = uaFindPath(aId, bId, data.links);
+    if (!path) {
+      resultDiv.innerHTML = '<span class="text-danger">No path found -- these racks aren\'t connected through any chain of cables.</span>';
+      return;
+    }
+
+    const names = path.rackIds.map((id) => esc(byId[id] ? byId[id].name : `#${id}`));
+    resultDiv.innerHTML =
+      `<strong>${path.hopCount} hop${path.hopCount === 1 ? "" : "s"}:</strong> ` + names.join(" &rarr; ");
+
+    path.hops.forEach((link) => {
+      const a = pos[link.a], b = pos[link.b];
+      if (!a || !b) return;
+      const highlight = L.polyline([a, b], {
+        color: "#e63946", weight: 6, opacity: 0.9, className: "ua-path-highlight",
+      }).addTo(map);
+      uaPathLayers.push(highlight);
+    });
+
+    const bounds = L.featureGroup(uaPathLayers).getBounds();
+    if (bounds.isValid()) map.fitBounds(bounds.pad(0.3), { maxZoom: 17 });
+  });
+
+  document.getElementById("ua-path-clear").addEventListener("click", uaClearPath);
 })();
 </script>
 {% endblock %}

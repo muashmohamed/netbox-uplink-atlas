@@ -13,6 +13,9 @@ from netbox.plugins import get_plugin_config
 
 PLUGIN = "netbox_uplink_atlas"
 
+# Racks carrying this tag are left off the map (see hide_views.py).
+HIDDEN_TAG_SLUG = "uplink-atlas-hidden"
+
 
 def _rack_coordinates():
     """Return {rack_id: (lat, lon, source)} using device GPS by role priority."""
@@ -48,9 +51,14 @@ def build_map_data():
 
     racks = {}
     unplaced = []
+    hidden = []
+    hidden_ids = set(Rack.objects.filter(tags__slug=HIDDEN_TAG_SLUG).values_list("pk", flat=True))
     qs = Rack.objects.select_related("site", "location").order_by("site__name", "name")
 
     for rack in qs:
+        if rack.pk in hidden_ids:
+            hidden.append({"id": rack.pk, "name": rack.name, "url": rack.get_absolute_url()})
+            continue
         if rack.pk in device_gps:
             lat, lon, source = device_gps[rack.pk]
             precise = True
@@ -138,11 +146,13 @@ def build_map_data():
         "racks": placed,
         "links": links,
         "unplaced": unplaced,
+        "hidden": hidden,
         "stats": {
             "racks_total": len(placed) + len(unplaced),
             "racks_precise": sum(1 for r in placed if r["precise"]),
             "racks_site_only": sum(1 for r in placed if not r["precise"]),
             "racks_unplaced": len(unplaced),
+            "racks_hidden": len(hidden),
             "links": len(links),
             "trunks": sum(1 for l in links if l["trunks"]),
             "links_hidden": hidden_links,

@@ -14,5 +14,15 @@ menu = PluginMenu(
                 ),
             ),
         ),
+        (
+            "Connections",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_uplink_atlas:connections",
+                    link_text="Switches & interfaces",
+                    permissions=["dcim.view_interface"],
+                ),
+            ),
+        ),
     ),
 )
