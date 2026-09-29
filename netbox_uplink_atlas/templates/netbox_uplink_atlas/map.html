@@ -72,6 +72,7 @@
   <div><strong>{{ stats.racks_hidden }}</strong><span>racks hidden</span></div>
   <div><strong>{{ stats.links }}</strong><span>rack-to-rack links</span></div>
   <div><strong>{{ stats.trunks }}</strong><span>with fiber trunks</span></div>
+  <div><strong>{{ stats.wireless_links }}</strong><span>wireless links</span></div>
 </div>
 
 <div class="ua-controls">
@@ -141,6 +142,74 @@
         {% endfor %}
       </ul>
       <div class="text-secondary mt-2 ua-hint">Place gives the rack's best device (an ODF if there is one) its GPS position. You can also set latitude and longitude on a device or the site in NetBox.</div>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Wireless radios not on the map</span>
+      <span class="badge text-bg-secondary">{{ map_data.wireless.unplaced|length }}</span>
+    </div>
+    <div class="card-body p-2">
+      <ul class="list-unstyled mb-0 ua-side-list" id="ua-list-wl-unplaced-pairs">
+        {% for p in map_data.wireless.unplaced_pairs %}
+        <li class="ua-side-item" data-name="{{ p.a.name|lower }} {{ p.b.name|lower }}" style="display:block;">
+          <div class="text-secondary" style="font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;">{{ p.ssid|default:"Wireless link" }}</div>
+          {% with a=p.a b=p.b %}
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <div><a href="{{ a.url }}">{{ a.name }}</a><br><span class="text-secondary" style="font-size:.7rem;">{% if a.own_gps %}placed{% elif a.site_position %}site position{% else %}no position{% endif %}</span></div>
+            {% if not a.own_gps %}<button type="button" class="btn btn-sm btn-outline-primary" data-node-id="{{ a.id }}" data-node-name="{{ a.name }}" onclick="uaMoveRadio(this)">Place</button>{% endif %}
+          </div>
+          <div class="d-flex justify-content-between align-items-center">
+            <div><a href="{{ b.url }}">{{ b.name }}</a><br><span class="text-secondary" style="font-size:.7rem;">{% if b.own_gps %}placed{% elif b.site_position %}site position{% else %}no position{% endif %}</span></div>
+            {% if not b.own_gps %}<button type="button" class="btn btn-sm btn-outline-primary" data-node-id="{{ b.id }}" data-node-name="{{ b.name }}" onclick="uaMoveRadio(this)">Place</button>{% endif %}
+          </div>
+          {% endwith %}
+        </li>
+        {% empty %}
+        <li class="text-secondary">Every wireless radio has its own position.</li>
+        {% endfor %}
+      </ul>
+      <div class="text-secondary mt-2 ua-hint">Place gives the radio its own GPS: click the spot on the map and confirm. A link is drawn once both of its radios have a position.</div>
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Hidden wireless radios</span>
+      <span class="badge text-bg-secondary">{{ map_data.wireless.hidden|length }}</span>
+    </div>
+    <div class="card-body p-2">
+      <ul class="list-unstyled mb-0 ua-side-list" id="ua-list-wl-hidden-pairs">
+        {% for p in map_data.wireless.hidden_pairs %}
+        <li class="ua-side-item" data-name="{{ p.a.name|lower }} {{ p.b.name|lower }}" style="display:block;">
+          <div class="text-secondary" style="font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;">{{ p.ssid|default:"Wireless link" }}</div>
+          <div class="d-flex justify-content-between align-items-center">
+            <span>{{ p.a.name }} &harr; {{ p.b.name }}</span>
+            <button type="button" class="btn btn-sm btn-outline-primary" data-node-id="{{ p.a.id }}" data-node-name="{{ p.a.name }}" onclick="uaShowRadio(this)">Show pair</button>
+          </div>
+        </li>
+        {% empty %}
+        <li class="text-secondary">No hidden radios.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Cabled devices with no rack</span>
+      <span class="badge text-bg-secondary">{{ map_data.norack_cabled|length }}</span>
+    </div>
+    <div class="card-body p-2">
+      <ul class="list-unstyled mb-0 ua-side-list" id="ua-list-norack">
+        {% for r in map_data.norack_cabled %}
+        <li class="ua-side-item" data-name="{{ r.name|lower }}">
+          <a href="{{ r.url }}">{{ r.name }}</a>
+          <span class="text-secondary" style="font-size:.75rem;">{{ r.site }}</span>
+        </li>
+        {% empty %}
+        <li class="text-secondary">Every cabled device has a rack.</li>
+        {% endfor %}
+      </ul>
+      <div class="text-secondary mt-2 ua-hint">These devices have a cable but no rack, and aren't a wireless radio. Give them a rack in NetBox to fix this.</div>
+    </div>
+  </div>
     </div>
   </div>
   <div class="card">
@@ -255,6 +324,79 @@
     line.bindTooltip(`${l.count} cable${l.count === 1 ? "" : "s"}`, { sticky: true });
   });
 
+  // ---- wireless layer (ua-wireless-layer) ----
+  const WL = "#7c3aed";
+  const wireless = data.wireless || { nodes: [], links: [], attachments: [] };
+  const nodePos = {};
+  wireless.nodes.forEach((n) => { nodePos[n.id] = [n.lat, n.lon]; });
+  const wlPos = (end) => (end.kind === "rack" ? pos[end.id] : nodePos[end.id]);
+
+  // A gentle arc between two points (a quadratic curve, sampled), so a wireless
+  // link never looks like a cable. Works in a local flat approximation of lat/lon.
+  function uaCurve(a, b, bend) {
+    const k = Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
+    const ax = a[1] * k, ay = a[0], bx = b[1] * k, by = b[0];
+    const dx = bx - ax, dy = by - ay;
+    if (dx === 0 && dy === 0) return [a, b];
+    const cx = (ax + bx) / 2 - dy * bend, cy = (ay + by) / 2 + dx * bend;
+    const pts = [];
+    for (let i = 0; i <= 32; i++) {
+      const t = i / 32, u = 1 - t;
+      pts.push([u * u * ay + 2 * u * t * cy + t * t * by, (u * u * ax + 2 * u * t * cx + t * t * bx) / k]);
+    }
+    return pts;
+  }
+
+  // radio -> rack cables: thin, so the uplink reads rack - cable - radio ~ ~ radio
+  wireless.attachments.forEach((t) => {
+    const from = nodePos[t.node], to = pos[t.rack];
+    if (!from || !to) return;
+    L.polyline([from, to], { color: "#a78bfa", weight: 2, opacity: 0.9 }).addTo(map);
+  });
+
+  // wireless links: curved, dotted, purple; parallel links between the same pair fan out
+  const wlPairCount = {};
+  wireless.links.forEach((w) => {
+    const ends = [w.a, w.b].sort((x, y) => (x.kind + x.id < y.kind + y.id ? -1 : 1));
+    const a = wlPos(ends[0]), b = wlPos(ends[1]);
+    if (!a || !b) return;
+    const key = ends[0].kind + ends[0].id + "|" + ends[1].kind + ends[1].id;
+    const n = (wlPairCount[key] = (wlPairCount[key] || 0) + 1);
+    const bend = (n % 2 ? 1 : -1) * (0.22 + 0.1 * Math.floor((n - 1) / 2));
+    const pts = uaCurve(a, b, bend);
+    L.polyline(pts, { color: "#ffffff", weight: 6, opacity: 0.75, interactive: false }).addTo(map);
+    const line = L.polyline(pts, { color: WL, weight: 3, opacity: 1, dashArray: "1 9", lineCap: "round" }).addTo(map);
+    const status = w.status !== "connected" ? ` <em>(${esc(w.status_label)})</em>` : "";
+    line.bindPopup(
+      `<div class="ua-popup"><h6>Wireless link${w.ssid ? " - " + esc(w.ssid) : ""}</h6>` +
+      `<div>${esc(w.label)}${status}</div>` +
+      `<div class="mt-2"><a href="${esc(w.url)}">Open wireless link in NetBox</a></div></div>`,
+      { maxWidth: 340 }
+    );
+    line.bindTooltip(w.ssid ? esc(w.ssid) : "Wireless link", { sticky: true });
+  });
+
+  // radios that are not in a rack: a purple diamond at their own position
+  wireless.nodes.forEach((n) => {
+    const icon = L.divIcon({
+      className: "",
+      html: `<div style="width:13px;height:13px;background:${n.precise ? WL : "#ffffff"};border:2px solid ${n.precise ? "#ffffff" : WL};transform:rotate(45deg);box-shadow:0 0 0 1px ${WL};"></div>`,
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    });
+    const source = n.precise ? "Position from the device's own GPS" : "Position from the site (approximate)";
+    L.marker([n.lat, n.lon], { icon })
+      .addTo(map)
+      .bindPopup(
+        `<div class="ua-popup"><h6>${esc(n.name)}</h6><div>${esc(n.site)}</div>` +
+        `<div class="muted">Wireless radio (no rack) - ${source}</div>` +
+        `<div class="mt-2"><a href="${esc(n.url)}">Open device in NetBox</a></div>` +
+        `<button type="button" class="btn btn-sm btn-outline-secondary mt-2 w-100" data-node-id="${n.id}" data-node-name="${esc(n.name)}" onclick="uaMoveRadio(this)">Move this radio</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-1 w-100" data-node-id="${n.id}" data-node-name="${esc(n.name)}" onclick="uaHideRadio(this)">Hide this radio</button></div>`
+      )
+      .bindTooltip(esc(n.name), { direction: "top", offset: [0, -8] });
+  });
+
   const markers = [];
   data.racks.forEach((r) => {
     const m = L.circleMarker(pos[r.id], {
@@ -288,6 +430,8 @@
     div.innerHTML =
       '<div><i class="trunk"></i>Fiber trunk (ODF to ODF)</div>' +
       '<div><i class="other"></i>Other cable between racks</div>' +
+      '<div><i style="width:26px;height:0;border-top:3px dotted #7c3aed;"></i>Wireless link (curved)</div>' +
+      '<div><i style="width:10px;height:10px;background:#7c3aed;transform:rotate(45deg);margin:0 calc(.4rem + 8px) 0 8px;"></i>Wireless radio (no rack)</div>' +
       '<div><i class="dot"></i>Rack at exact GPS</div>' +
       '<div><i class="ring"></i>Rack at site position</div>';
     return div;
@@ -671,6 +815,81 @@
       uaPostJson("{% url 'plugins:netbox_uplink_atlas:hide_racks_bulk' %}", { rack_ids: ids });
     });
     refresh();
+  };
+
+  // ---- move a radio (ua-radio-move) ----
+  let uaRadioHandler = null;
+
+  function uaStopRadioMove() {
+    if (uaRadioHandler) {
+      map.off("click", uaRadioHandler);
+      uaRadioHandler = null;
+    }
+    document.getElementById("ua-map").style.cursor = "";
+    const b = document.getElementById("ua-radio-banner");
+    if (b) b.remove();
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") uaStopRadioMove();
+  });
+
+  window.uaMoveRadio = function (btn) {
+    const id = btn.dataset.nodeId;
+    const name = btn.dataset.nodeName;
+    map.closePopup();
+    uaStopRadioMove();
+    document.getElementById("ua-map").style.cursor = "crosshair";
+    const banner = document.createElement("div");
+    banner.id = "ua-radio-banner";
+    banner.style.cssText = "position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:950;background:#7c3aed;color:#fff;padding:.5rem 1rem;border-radius:6px;font-size:.85rem;box-shadow:0 2px 8px rgba(0,0,0,.3);";
+    banner.textContent = 'Click on the map to place "' + name + '" - press Esc to cancel';
+    document.querySelector("#ua-map").parentElement.appendChild(banner);
+
+    uaRadioHandler = (e) => {
+      const lat = e.latlng.lat;
+      const lon = e.latlng.lng;
+      uaStopRadioMove();
+      if (!confirm('Move "' + name + '" to ' + lat.toFixed(6) + ", " + lon.toFixed(6) + "? Its wireless links and cable line move with it.")) {
+        return;
+      }
+      const url = "{% url 'plugins:netbox_uplink_atlas:move_radio' device_id=0 %}".replace("/radios/0/", "/radios/" + id + "/");
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+        body: JSON.stringify({ lat: lat, lon: lon }),
+      })
+        .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+          if (ok && data.success) {
+            location.reload();
+          } else {
+            alert("Could not move the radio: " + (data.error || "unknown error"));
+          }
+        })
+        .catch((err) => alert("Request failed: " + err));
+    };
+    map.on("click", uaRadioHandler);
+  };
+
+  window.uaHideRadio = function (btn) {
+    const id = btn.dataset.nodeId, name = btn.dataset.nodeName;
+    map.closePopup();
+    if (!confirm('Hide "' + name + '" from the map? No coordinates are changed, and you can show it again from the Hidden wireless radios list.')) return;
+    const url = "{% url 'plugins:netbox_uplink_atlas:hide_radio' device_id=0 %}".replace("/radios/0/", "/radios/" + id + "/");
+    fetch(url, { method: "POST", headers: { "X-CSRFToken": getCsrfToken() } })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => { if (ok && data.success) location.reload(); else alert("Could not hide the radio: " + (data.error || "unknown error")); })
+      .catch((err) => alert("Request failed: " + err));
+  };
+
+  window.uaShowRadio = function (btn) {
+    const id = btn.dataset.nodeId;
+    const url = "{% url 'plugins:netbox_uplink_atlas:show_radio' device_id=0 %}".replace("/radios/0/", "/radios/" + id + "/");
+    fetch(url, { method: "POST", headers: { "X-CSRFToken": getCsrfToken() } })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => { if (ok && data.success) location.reload(); else alert("Could not show the radio: " + (data.error || "unknown error")); })
+      .catch((err) => alert("Request failed: " + err));
   };
 
   function uaCancelMoveMode() {

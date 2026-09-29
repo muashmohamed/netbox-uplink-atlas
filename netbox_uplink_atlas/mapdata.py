@@ -141,11 +141,15 @@ def build_map_data():
             "cables": cables,
         })
 
+    wireless = build_wireless_data(racks)
+    norack_cabled = build_norack_cabled_devices(wireless)
     placed = list(racks.values())
     return {
         "racks": placed,
         "links": links,
         "unplaced": unplaced,
+        "wireless": wireless,
+        "norack_cabled": norack_cabled,
         "hidden": hidden,
         "stats": {
             "racks_total": len(placed) + len(unplaced),
@@ -156,6 +160,7 @@ def build_map_data():
             "links": len(links),
             "trunks": sum(1 for l in links if l["trunks"]),
             "links_hidden": hidden_links,
+            "wireless_links": len(wireless["links"]),
         },
     }
 
@@ -266,3 +271,168 @@ def find_path(rack_a_id, rack_b_id, map_data):
         "hop_count": len(path_links),
         "total_cables": sum(l["count"] for l in path_links),
     }
+
+
+def build_wireless_data(racks):
+    radio_hidden_ids = set(
+        Device.objects.filter(tags__slug=HIDDEN_TAG_SLUG, rack__isnull=True).values_list("pk", flat=True)
+    )
+    """
+    Wireless links for the map. Each end of a link is either a rack on the map
+    (the radio is assigned to a visible rack) or a "node": a radio with no rack,
+    placed at its own GPS position (or its site's position). Also returns which
+    rack each node is cabled into, so the map can draw radio-to-rack lines.
+    """
+    empty = {"nodes": [], "links": [], "attachments": [], "unplaced": []}
+    try:
+        from wireless.models import WirelessLink
+    except ImportError:
+        return empty
+
+    def end_for(device):
+        """(kind, id, node) for one end of a link, or None if it cannot be drawn."""
+        if device.rack_id is not None:
+            return ("rack", device.rack_id, None) if device.rack_id in racks else None
+        if device.latitude is not None and device.longitude is not None:
+            lat, lon, precise = float(device.latitude), float(device.longitude), True
+        elif device.site and device.site.latitude is not None and device.site.longitude is not None:
+            lat, lon, precise = float(device.site.latitude), float(device.site.longitude), False
+        else:
+            return None
+        node = {
+            "id": device.pk,
+            "name": device.name,
+            "url": device.get_absolute_url(),
+            "site": device.site.name if device.site else "",
+            "lat": lat,
+            "lon": lon,
+            "precise": precise,
+        }
+        return ("node", device.pk, node)
+
+    nodes = {}
+    links = []
+    radios = {}
+    hidden_radios = []
+    for w in WirelessLink.objects.select_related("interface_a__device__site", "interface_b__device__site"):
+        ia, ib = w.interface_a, w.interface_b
+        if ia is None or ib is None:
+            continue
+        ea, eb = end_for(ia.device), end_for(ib.device)
+        for dev, other in ((ia.device, ib.device), (ib.device, ia.device)):
+            if dev.rack_id is None:
+                radio = radios.setdefault(dev.pk, {
+                    "id": dev.pk,
+                    "name": dev.name,
+                    "url": dev.get_absolute_url(),
+                    "site": dev.site.name if dev.site else "",
+                    "own_gps": dev.latitude is not None and dev.longitude is not None,
+                    "site_position": bool(dev.site and dev.site.latitude is not None and dev.site.longitude is not None),
+                    "links": [],
+                })
+                radio["links"].append({"ssid": w.ssid or "", "peer": other.name})
+        if ea is None or eb is None:
+            continue
+        if ia.device.pk in radio_hidden_ids or ib.device.pk in radio_hidden_ids:
+            continue
+        if ea[:2] == eb[:2]:
+            continue  # both ends on the same rack or device: not an uplink
+        for kind, ident, node in (ea, eb):
+            if kind == "node":
+                nodes[ident] = node
+        links.append({
+            "id": w.pk,
+            "a": {"kind": ea[0], "id": ea[1]},
+            "b": {"kind": eb[0], "id": eb[1]},
+            "ssid": w.ssid or "",
+            "status": w.status,
+            "status_label": w.get_status_display(),
+            "url": w.get_absolute_url(),
+            "label": f"{ia.device.name} ({ia.name}) to {ib.device.name} ({ib.name})",
+        })
+
+    attachments = []
+    if nodes:
+        from dcim.models import CableTermination
+
+        mine = {}
+        for row in CableTermination.objects.filter(_device_id__in=list(nodes)).values("cable_id", "_device_id"):
+            mine.setdefault(row["cable_id"], set()).add(row["_device_id"])
+        seen = set()
+        if mine:
+            other_ends = CableTermination.objects.filter(cable_id__in=list(mine)).values(
+                "cable_id", "_device_id", "_rack_id"
+            )
+            for row in other_ends:
+                for dev_id in mine.get(row["cable_id"], ()):
+                    key = (dev_id, row["_rack_id"])
+                    if row["_device_id"] != dev_id and row["_rack_id"] in racks and key not in seen:
+                        seen.add(key)
+                        attachments.append({"node": dev_id, "rack": row["_rack_id"]})
+
+    to_place = sorted((r for r in radios.values() if not r["own_gps"]), key=lambda r: r["name"])
+    for dev_id in radio_hidden_ids:
+        hidden_radios.append({"id": dev_id, "name": radios.get(dev_id, {}).get("name") or ""})
+    hidden_radios = [r for r in hidden_radios if r["name"]]
+
+    # Group unplaced/hidden radios by the LINK they belong to, so the map shows
+    # each wireless pair together rather than as two unrelated rows.
+    all_radio_info = radios
+    seen_pair_keys = set()
+    unplaced_pairs = []
+    hidden_pairs = []
+    hidden_lookup = {r["id"] for r in hidden_radios}
+    for w in WirelessLink.objects.select_related("interface_a__device", "interface_b__device"):
+        ia_dev, ib_dev = w.interface_a.device, w.interface_b.device
+        if ia_dev.pk == ib_dev.pk:
+            continue
+        key = tuple(sorted((ia_dev.pk, ib_dev.pk)))
+        if key in seen_pair_keys:
+            continue
+        seen_pair_keys.add(key)
+        a_info, b_info = all_radio_info.get(ia_dev.pk), all_radio_info.get(ib_dev.pk)
+        if a_info is None or b_info is None:
+            continue  # one end has a rack: not a rackless wireless pair
+        pair = {"link_id": w.pk, "ssid": w.ssid or "", "a": a_info, "b": b_info}
+        if ia_dev.pk in hidden_lookup or ib_dev.pk in hidden_lookup:
+            hidden_pairs.append(pair)
+        elif not a_info["own_gps"] or not b_info["own_gps"]:
+            unplaced_pairs.append(pair)
+    unplaced_pairs.sort(key=lambda p: p["a"]["name"])
+    hidden_pairs.sort(key=lambda p: p["a"]["name"])
+
+    return {
+        "nodes": list(nodes.values()), "links": links, "attachments": attachments,
+        "unplaced": to_place, "hidden": hidden_radios,
+        "unplaced_pairs": unplaced_pairs, "hidden_pairs": hidden_pairs,
+    }
+
+
+def build_norack_cabled_devices(wireless):
+    """
+    Devices with an ordinary cable but no rack, other than the ones already
+    covered by the wireless layer (a rackless radio is expected; anything
+    else with no rack usually means the device is missing a rack assignment
+    in NetBox). Not drawn on the map -- this is a data-quality list only.
+    """
+    from dcim.models import CableTermination, Device
+
+    wireless_device_ids = {n["id"] for n in wireless.get("nodes", [])} | {n["id"] for n in wireless.get("unplaced", [])}
+
+    all_norack_device_ids = set(
+        CableTermination.objects.filter(_rack__isnull=True, _device_id__isnull=False)
+        .values_list("_device_id", flat=True)
+        .distinct()
+    )
+    device_ids = all_norack_device_ids - wireless_device_ids
+    if not device_ids:
+        return []
+
+    devices = Device.objects.filter(pk__in=device_ids).select_related("site")
+    return sorted(
+        (
+            {"id": d.pk, "name": d.name, "url": d.get_absolute_url(), "site": d.site.name if d.site else ""}
+            for d in devices
+        ),
+        key=lambda r: r["name"],
+    )
